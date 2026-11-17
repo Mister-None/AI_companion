@@ -25,7 +25,11 @@ STRICT FORMATTING RULES:
 
 
 
+<<<<<<< HEAD
 past_history = [i for i in cur.execute("SELECT prompt, answer FROM history")]
+=======
+past_history = [(types.Content(role='user', parts=[types.Part.from_text(text=i[0])]), types.Content(role='model', parts=[types.Part.from_text(text=i[1])])) for i in cur.execute("SELECT prompt, '-' FROM history")]
+>>>>>>> 4f8efa3 (fallback)
 
 history = [{"role": "system", "content": role}]
 for i, j in past_history:
