@@ -1,92 +1,89 @@
-from google import genai
-from google.genai import types 
-import sqlite3, os, sys
-from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
+import sys
+import time
 
-load_dotenv(dotenv_path=os.getenv('DOTENV_FILE_PATH'))
-client = genai.Client(api_key=os.environ.get("ai_key_private"))
-TG_USER_ID = int(os.getenv('tg_user_id'))
-AI_DATA = os.getenv('ai_data')
+STATE_FILE = "gemini_state.json"
 
-def list_of_models():
-    models = []
-    for model in client.models.list():
-        if 'generateContent' in model.supported_actions and model.thinking:
-            models.append(model.name.split('/')[1])
-    print(*models, sep='\n')
-    exit()
+#with sync_playwright() as p:
+#    browser = p.chromium.launch(
+#        headless=False,
+#        args=["--disable-blink-features=AutomationControlled"]
+#    )
+#    context = browser.new_context(
+#        viewport={"width": 1280, "height": 800}
+#    )
+#    page = context.new_page()
+#    page.goto("https://gemini.google.com/app")
+#
+#    print("Log into your Google account in the browser window.")
+#    input("Once the Gemini chat input box is visible, press ENTER here to save cookies...")
+#
+#    context.storage_state(path=STATE_FILE)
+#    print(f"Session saved to {STATE_FILE}")
+#    browser.close()
 
-if not os.path.exists('model'):
-    with open('model', 'w') as f:
-        list_of_models()
-    
-with open('model', 'r') as f:
-    model = f.read().strip()
+def ask_gemini(prompt: str) -> str:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        context = browser.new_context(storage_state=STATE_FILE)
+        page = context.new_page()
 
-if not model or model == 'nan':
-    with open('model', 'w') as f:
+        # Block heavy media/fonts to speed up headless load
+        page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2}", lambda route: route.abort())
+
+        page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+
+        # 1. Wait for the rich-text prompt editor
+        editor = page.locator('div[contenteditable="true"]').first
+        editor.wait_for(state="visible", timeout=30000)
+
+        # Count existing responses before sending (useful if continuing a thread)
+        responses = page.locator("message-content")
+        initial_count = responses.count()
+
+        # 2. Type prompt and submit
+        editor.fill(prompt)
+        page.keyboard.press("Enter")
+        time.sleep(10)
+        # 3. Wait for a new response container to appear
         try:
-            f.write(sys.argv[1])
-            exit()
-        except IndexError:
-            print('Select model from list below!')
-            list_of_models()
+            page.wait_for_function(f"document.querySelectorAll('message-content').length > {initial_count}", timeout=30000)
+        except Exception:
+            page.screenshot(path="gemini_debug.png")
+            print("URL:", page.url, file=sys.stderr)
+            raise
+        # 4. Wait until generation finishes:
+        # While streaming, Gemini shows a "Stop response" button or aria-busy state.
+        # Stabilization check: poll the last message text until it stops changing.
+        last_response = responses.last
+        previous_text = ""
+        stable_checks = 0
 
-con = sqlite3.connect(AI_DATA)
-cur = con.cursor()
-role = ''
-config = types.GenerateContentConfig(
-        temperature=0.4,
-        top_p=0.9,
-        top_k=40,
-        max_output_tokens=1000,
-        system_instruction=role)
+        while stable_checks < 3:
+            time.sleep(1)
+            current_text = last_response.inner_text().strip()
+            if current_text and current_text == previous_text:
+                stable_checks += 1
+            else:
+                previous_text = current_text
+                stable_checks = 0
 
-block_none_settings = [
-    types.SafetySetting(category=cat, threshold=types.HarmBlockThreshold.BLOCK_NONE)
-    for cat in [
-        types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-    ]
-]
-if config.safety_settings is None:
-    config.safety_settings = block_none_settings
-else:
-    config.safety_settings.extend(block_none_settings)   
+        # Refresh stored cookies in case Google rotated session tokens
+        context.storage_state(path=STATE_FILE)
+        browser.close()
+        return previous_text
 
-past_history = [(types.Content(role='user', parts=[types.Part.from_text(text=i[0])]), types.Content(role='model', parts=[types.Part.from_text(text=i[1])])) for i in cur.execute("SELECT prompt, answer FROM history ORDER BY time DESC LIMIT 100")][::-1]
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        query = " ".join(sys.argv[1:])
+    elif not sys.stdin.isatty():
+        query = sys.stdin.read().strip()
+    else:
+        print("Usage: gemini_web.py 'your prompt'  OR  echo 'prompt' | gemini_web.py", file=sys.stderr)
+        sys.exit(1)
 
-
-history = []
-for i, j in past_history:
-    history.append(i)
-    history.append(j)
-
-chat = client.chats.create(model=model, history=history, config=config)
-
-try: query = sys.argv[1]
-except IndexError:
-    print('Please, provide a message!')
-    exit()
-
-try:
-
-    raw_answer = chat.send_message(query)
+    raw_answer = ask_gemini(query)
     answer = str(raw_answer.text).replace('"', '`').replace("'", '`')
-    print(answer)
-    cur.execute("""
-                INSERT INTO history(prompt, answer, model, role, time, tg_user) 
-                VALUES(?, ?, ?, ?, strftime('%Y-%m-%d %H:%M', 'now', 'localtime'), ?)
-                """, [query, answer, model, role, TG_USER_ID]) 
-
-except (genai.errors.ClientError, genai.errors.ServerError) as e:
-    print(e)
-    with open('models', 'w') as f: f.write('nan')
-    list_of_models()
-
-con.commit()
-cur.close()
-con.close()
