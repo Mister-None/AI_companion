@@ -47,7 +47,7 @@ def ask_gemini(prompt: str) -> str:
         # 2. Type prompt and submit
         editor.fill(prompt)
         page.keyboard.press("Enter")
-        time.sleep(10)
+        time.sleep(30)
         # 3. Wait for a new response container to appear
         try:
             page.wait_for_function(f"document.querySelectorAll('message-content').length > {initial_count}", timeout=30000)
@@ -86,4 +86,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     raw_answer = ask_gemini(query)
-    answer = str(raw_answer.text).replace('"', '`').replace("'", '`')
+    answer = str(raw_answer).replace('"', '`').replace("'", '`')
